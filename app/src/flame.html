@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TokenBlaze Flame</title>
+    <link rel="stylesheet" href="flame.css" />
+  </head>
+  <body>
+    <main class="flame-panel" id="panel">
+      <section class="hover-card" id="hover-card" aria-live="polite">
+        <header class="card-heading">
+          <span class="card-kicker" id="today-label">今日燃烧</span>
+          <span class="live-rate" id="live-rate"></span>
+        </header>
+        <strong class="daily-total" id="daily-total">0</strong>
+        <ul class="source-list" id="source-list"></ul>
+        <footer class="card-footer" id="card-footer">刚刚更新 · 数据只保存在本机</footer>
+      </section>
+      <div class="flame-zone" id="flame-zone" aria-label="Live TokenBlaze flame">
+        <canvas id="fire"></canvas>
+      </div>
+    </main>
+    <script src="hd-fire.js"></script>
+    <script src="flame.js"></script>
+  </body>
+</html>
