@@ -2,6 +2,13 @@ const invoke = window.__TAURI__?.core?.invoke;
 const panel = document.getElementById('panel');
 const flameZone = document.getElementById('flame-zone');
 const renderer = window.HDFireRenderer.attach(document.getElementById('fire'));
+const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+let selectedTheme = 'Dark';
+function applyTheme() {
+  document.documentElement.dataset.theme = selectedTheme === 'System'
+    ? (systemTheme.matches ? 'dark' : 'light') : selectedTheme.toLowerCase();
+}
+systemTheme.addEventListener('change', applyTheme);
 const labels = {
   English: { today: 'TODAY', minute: '/ min', footer: 'Updated just now · Usage stays on this device', empty: 'No token usage today' },
   Chinese: { today: '今日燃烧', minute: '/ 分钟', footer: '刚刚更新 · 数据只保存在本机', empty: '今日暂无 Token 消耗' },
@@ -19,6 +26,8 @@ const compact = (value) => new Intl.NumberFormat('en-US', {
 }).format(Math.max(0, value || 0));
 
 function renderSummary(state) {
+  selectedTheme = state.theme || 'Dark';
+  applyTheme();
   const copy = labels[state.language] || labels.English;
   const sizeScale = state.config?.flameSize === 'Small' ? 1
     : state.config?.flameSize === 'Large' ? 2.75 : 1.75;

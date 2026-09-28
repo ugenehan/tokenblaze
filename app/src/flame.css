@@ -142,3 +142,12 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .hover-card { transition-duration: 1ms; }
 }
+
+:root[data-theme="light"] { color-scheme: light; color: #30251f; }
+[data-theme="light"] .hover-card { background: #fffaf5; border-color: rgba(83, 56, 40, .18); }
+[data-theme="light"] .card-heading,[data-theme="light"] .card-footer { color: #756960; }
+[data-theme="light"] .live-rate { color: #9e5a18; }
+[data-theme="light"] .daily-total { color: #30251f; }
+[data-theme="light"] .source-row { color: #55473e; }
+[data-theme="light"] .source-tokens { color: #3c3029; }
+[data-theme="light"] .card-footer { border-top-color: rgba(83, 56, 40, .14); }

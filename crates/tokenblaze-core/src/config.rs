@@ -8,10 +8,19 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Write;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AppTheme {
+    System,
+    #[default]
+    Dark,
+    Light,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub language: AppLanguage,
+    pub theme: AppTheme,
     pub flame_size: FlameSize,
     pub sound_enabled: bool,
     pub sound_volume: f32,
@@ -49,6 +58,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         AppConfig {
             language: AppLanguage::English,
+            theme: AppTheme::Dark,
             flame_size: FlameSize::Medium,
             sound_enabled: true,
             sound_volume: 0.48,
@@ -179,6 +189,7 @@ mod tests {
 
         assert!(!config.sound_enabled);
         assert_eq!(config.language, defaults.language);
+        assert_eq!(config.theme, defaults.theme);
         assert_eq!(config.flame_size, defaults.flame_size);
         assert_eq!(config.sound_volume, defaults.sound_volume);
         assert_eq!(
@@ -193,6 +204,7 @@ mod tests {
     fn console_preferences_survive_serialization() {
         let mut config = AppConfig {
             language: AppLanguage::Chinese,
+            theme: AppTheme::Light,
             flame_size: FlameSize::Large,
             sound_enabled: false,
             sound_volume: 0.25,
@@ -207,6 +219,7 @@ mod tests {
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.language, AppLanguage::Chinese);
+        assert_eq!(restored.theme, AppTheme::Light);
         assert_eq!(restored.flame_size, FlameSize::Large);
         assert!(!restored.sound_enabled);
         assert_eq!(restored.sound_volume, 0.25);

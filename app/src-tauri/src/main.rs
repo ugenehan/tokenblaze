@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Wry};
 use tauri_plugin_store::{Store, StoreExt};
-use tokenblaze_core::config::AppConfig;
+use tokenblaze_core::config::{AppConfig, AppTheme};
 use tokenblaze_core::data::snapshot::{self, DashboardSnapshot, FireView};
 use tokenblaze_core::data::{UsageMonitor, UsageSource, UsageStore};
 use tokenblaze_core::fire::{
@@ -119,6 +119,7 @@ struct FireVisualState {
     today_tokens: i64,
     sources: Vec<snapshot::SourceView>,
     language: String,
+    theme: String,
 }
 
 impl AppState {
@@ -233,6 +234,7 @@ fn fire_visual_state(state: State<'_, AppState>) -> Result<FireVisualState, Stri
         today_tokens: dashboard.today_tokens,
         sources: dashboard.sources,
         language: dashboard.config.language,
+        theme: dashboard.config.theme,
     })
 }
 
@@ -525,6 +527,18 @@ fn set_language(
     if let Some(window) = app.get_webview_window("flame") {
         let _ = window.emit("language-changed", language.label());
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), String> {
+    let theme = match theme.as_str() {
+        "System" => AppTheme::System,
+        "Dark" => AppTheme::Dark,
+        "Light" => AppTheme::Light,
+        _ => return Err(format!("unsupported theme: {theme}")),
+    };
+    state.update_config(|config| config.theme = theme)?;
     Ok(())
 }
 
@@ -1198,6 +1212,7 @@ fn main() {
             set_panel_visible,
             set_flame_size,
             set_language,
+            set_theme,
             set_source_color,
             reset_source_colors,
             rescan,

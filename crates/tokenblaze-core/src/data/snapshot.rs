@@ -102,6 +102,8 @@ pub struct ConfigView {
     pub panel_visible: bool,
     #[serde(default = "default_language")]
     pub language: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default = "default_flame_size")]
     pub flame_size: String,
     #[serde(default = "default_token_poll_interval_seconds")]
@@ -218,6 +220,12 @@ pub fn config_view(config: &AppConfig) -> ConfigView {
         show_live_rate: config.show_live_rate,
         panel_visible: config.panel_visible,
         language: language_label(config.language).to_string(),
+        theme: match config.theme {
+            crate::config::AppTheme::System => "System",
+            crate::config::AppTheme::Dark => "Dark",
+            crate::config::AppTheme::Light => "Light",
+        }
+        .to_string(),
         flame_size: flame_size_label(config.flame_size).to_string(),
         token_poll_interval_seconds: config.token_poll_interval_seconds,
         source_colors: config.source_colors,
@@ -347,6 +355,10 @@ fn default_language() -> String {
     "English".to_string()
 }
 
+fn default_theme() -> String {
+    "Dark".to_string()
+}
+
 fn default_flame_size() -> String {
     "Medium".to_string()
 }
@@ -432,6 +444,10 @@ mod tests {
             Some(2)
         );
         assert!(value.get("flameSize").is_some());
+        assert_eq!(
+            value.get("theme").and_then(serde_json::Value::as_str),
+            Some("Dark")
+        );
         assert!(value.get("sourceColors").is_some());
         assert!(value.get("sound_enabled").is_none());
     }

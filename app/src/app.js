@@ -4,6 +4,9 @@ const builtInColors = ['#e8782e', '#47b86b', '#528feb', '#b86bf2', '#f29e38', '#
 let sourceColors = [...builtInColors];
 let snapshot = null;
 let overviewFlame = null;
+let mockTheme = 'Dark';
+let selectedTheme = 'Dark';
+const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 
 const translationRows = [
   ['window.title', 'TokenBlaze Console', 'TokenBlaze 控制台', 'TokenBlaze コンソール', 'TokenBlaze 콘솔'],
@@ -67,6 +70,11 @@ const translationRows = [
   ['sources.ampNotFound', 'Amp logs not found', '未找到 Amp 日志', 'Amp のログが見つかりません', 'Amp 로그를 찾을 수 없음'],
   ['sources.grokNotFound', 'Grok logs not found', '未找到 Grok 日志', 'Grok のログが見つかりません', 'Grok 로그를 찾을 수 없음'],
   ['appearance.eyebrow', 'VISUAL SYSTEM', '视觉系统', 'ビジュアルシステム', '비주얼 시스템'],
+  ['appearance.theme', 'Theme', '主题', 'テーマ', '테마'],
+  ['appearance.themeHint', 'Change the console and flame card colors.', '切换控制台和火焰信息卡的颜色。', 'コンソールと炎カードの色を切り替えます。', '콘솔과 불꽃 카드의 색상을 변경합니다.'],
+  ['theme.system', 'Follow system', '跟随系统', 'システムに従う', '시스템 설정 따르기'],
+  ['theme.dark', 'Dark', '深色', 'ダーク', '어둡게'],
+  ['theme.light', 'Light', '浅色', 'ライト', '밝게'],
   ['appearance.title', 'Appearance', '火焰外观', '炎の外観', '불꽃 모양'],
   ['appearance.intro', 'Shape the native flame while keeping the same quiet desktop presence.', '调整原生火焰，同时保持安静克制的桌面体验。', '静かなデスクトップの存在感を保ちながら、ネイティブの炎を調整します。', '차분한 데스크톱 분위기를 유지하면서 네이티브 불꽃을 조절합니다.'],
   ['appearance.reduceMotion', 'Reduce motion', '减少动态效果', '動きを減らす', '움직임 줄이기'],
@@ -152,6 +160,7 @@ let selectedLanguage = 'English';
 async function invoke(command, args = {}) {
   const api = window.__TAURI__?.core?.invoke;
   if (api) return api(command, args);
+  if (command === 'set_theme') { mockTheme = args.theme; return undefined; }
   if (command === 'dashboard_snapshot') return mockSnapshot();
   return undefined;
 }
@@ -168,7 +177,7 @@ function mockSnapshot() {
     fire: { intensity: .64 + Math.sin(t) * .08, fuel: .72, ember_heat: .45, spark_burst: .2, phase: 'flame', tier: 'crackle', color_mix: [.5, .25, .1, .05, .04, .03, .03], tokens_per_second: 24.8, animation_paused: false, previewing: false },
     sources: sourceNames.map((name, i) => ({ id: name.toLowerCase(), name, tokens: [8200, 4200, 2500, 1600, 900, 540, 300][i], state: i < 5 ? 'ok' : 'notFound', detail: i < 5 ? 'Connected' : 'Not detected' })),
     debug_tools_enabled: false,
-    config: { soundEnabled: false, soundVolume: .48, reduceMotion: false, showLiveRate: true, tokenPollIntervalSeconds: 2, panelVisible: true, language: 'English', flameSize: 'Medium', sourceColors: builtInColors.map(hexToRgb) },
+    config: { soundEnabled: false, soundVolume: .48, reduceMotion: false, showLiveRate: true, tokenPollIntervalSeconds: 2, panelVisible: true, language: 'English', theme: mockTheme, flameSize: 'Medium', sourceColors: builtInColors.map(hexToRgb) },
     update: { state: 'idle', version: null, progress: null, message: null },
   };
 }
@@ -200,6 +209,10 @@ const pollFrequencyRow = document.createElement('div');
 pollFrequencyRow.className = 'setting-row';
 pollFrequencyRow.innerHTML = '<div><strong data-i18n="settings.pollFrequency"></strong><small data-i18n="settings.pollFrequencyHint"></small></div><select id="token-poll-interval"><option value="1" data-i18n="settings.seconds1"></option><option value="2" data-i18n="settings.seconds2"></option><option value="5" data-i18n="settings.seconds5"></option><option value="10" data-i18n="settings.seconds10"></option></select>';
 document.querySelector('#view-settings .settings-card').prepend(pollFrequencyRow);
+const themeRow = document.createElement('div');
+themeRow.className = 'setting-row';
+themeRow.innerHTML = '<div><strong data-i18n="appearance.theme"></strong><small data-i18n="appearance.themeHint"></small></div><select id="theme"><option value="System" data-i18n="theme.system"></option><option value="Dark" data-i18n="theme.dark"></option><option value="Light" data-i18n="theme.light"></option></select>';
+document.querySelector('#view-appearance .settings-card').prepend(themeRow);
 const scrollbarStyle = document.createElement('style');
 scrollbarStyle.textContent = '*{scrollbar-width:thin;scrollbar-color:rgba(197,174,160,.05) transparent}*:hover{scrollbar-color:rgba(197,174,160,.2) transparent}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(197,174,160,.045);border:2px solid transparent;background-clip:padding-box;border-radius:99px;transition:background-color .18s ease}*:hover::-webkit-scrollbar-thumb{background-color:rgba(197,174,160,.2)}::-webkit-scrollbar-thumb:hover{background-color:rgba(232,166,108,.42)}';
 document.head.append(scrollbarStyle);
@@ -212,12 +225,26 @@ function applyLanguage(language) {
   document.querySelectorAll('[data-i18n-aria-label]').forEach((element) => { element.setAttribute('aria-label', tr(element.dataset.i18nAriaLabel)); });
 }
 
+function applyTheme(theme) {
+  selectedTheme = ['System', 'Dark', 'Light'].includes(theme) ? theme : 'Dark';
+  document.documentElement.dataset.theme = selectedTheme === 'System'
+    ? (systemTheme.matches ? 'dark' : 'light') : selectedTheme.toLowerCase();
+  $('theme').value = selectedTheme;
+}
+systemTheme.addEventListener('change', () => {
+  if (selectedTheme === 'System') {
+    applyTheme(selectedTheme);
+    if (snapshot) { drawChart(snapshot.hourly || []); drawWeekChart(snapshot.last_seven_days || []); }
+  }
+});
+
 function updateSnapshot(next) {
   snapshot = next;
   const config = next.config || {};
   overviewFlame?.setState({ fire: next.fire, reduceMotion: Boolean(configValue(config, 'reduceMotion', 'reduce_motion')) });
   const language = config.language || 'English';
   applyLanguage(language);
+  applyTheme(config.theme || 'Dark');
   const rescanButton = $('rescan');
   rescanButton.disabled = Boolean(next.is_rescanning);
   rescanButton.setAttribute('aria-busy', String(Boolean(next.is_rescanning)));
@@ -340,7 +367,7 @@ function renderUpdate(update) {
 
 function drawChart(points) {
   const canvas = $('chart-canvas'); const ctx = canvas.getContext('2d'); const w = canvas.width; const h = canvas.height; ctx.clearRect(0, 0, w, h); const max = Math.max(...points.map((point) => point.tokens), 1); const pad = 18; const gap = 7; const bw = (w - pad * 2 - gap * points.length) / Math.max(points.length, 1); let peak = { tokens: 0, hour: 0 };
-  ctx.strokeStyle = 'rgba(255,238,224,.08)'; ctx.lineWidth = 1; for (let i = 1; i < 4; i++) { const y = pad + (h - pad * 2) * (i / 4); ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke(); }
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--chart-grid'); ctx.lineWidth = 1; for (let i = 1; i < 4; i++) { const y = pad + (h - pad * 2) * (i / 4); ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke(); }
   points.forEach((point, i) => { if (point.tokens > peak.tokens) peak = point; const bh = (point.tokens / max) * (h - pad * 2); const x = pad + i * (bw + gap); const grad = ctx.createLinearGradient(0, h - pad - bh, 0, h - pad); grad.addColorStop(0, '#ff9e61'); grad.addColorStop(1, 'rgba(214,72,44,.2)'); ctx.fillStyle = grad; ctx.beginPath(); ctx.roundRect(x, h - pad - bh, Math.max(1, bw), bh, 4); ctx.fill(); });
   $('peak-label').textContent = peak.tokens ? tr('dynamic.peak', { hour: peak.hour }) : '—';
 }
@@ -354,7 +381,7 @@ function drawWeekChart(days) {
     const x = pad + index * (barWidth + gap); const barHeight = Math.max(2, day.tokens / max * (h - 55));
     const gradient = ctx.createLinearGradient(0, bottom - barHeight, 0, bottom); gradient.addColorStop(0, '#ffb56f'); gradient.addColorStop(1, 'rgba(214,72,44,.24)');
     ctx.fillStyle = gradient; ctx.beginPath(); ctx.roundRect(x, bottom - barHeight, barWidth, barHeight, 4); ctx.fill();
-    ctx.fillStyle = 'rgba(245,238,231,.62)'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--chart-label'); ctx.font = '11px system-ui'; ctx.textAlign = 'center';
     const date = new Date(`${day.date}T12:00:00`); ctx.fillText(new Intl.DateTimeFormat(document.documentElement.lang || undefined, { weekday: 'short' }).format(date), x + barWidth / 2, h - 10);
   });
 }
@@ -418,6 +445,7 @@ $('panel-visible').addEventListener('change', (event) => run('set_panel_visible'
 $('animation-paused').addEventListener('change', (event) => run('set_animation_paused', { paused: event.target.checked }));
 $('flame-size').addEventListener('change', (event) => run('set_flame_size', { size: event.target.value }));
 $('language').addEventListener('change', (event) => run('set_language', { language: event.target.value }));
+$('theme').addEventListener('change', (event) => run('set_theme', { theme: event.target.value }));
 $('source-path-source').addEventListener('change', () => refresh());
 $('save-source-path').addEventListener('click', async () => {
   try {

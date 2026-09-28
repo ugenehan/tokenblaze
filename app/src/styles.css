@@ -51,3 +51,43 @@ html,body{height:100%;overflow:hidden}
 .source-path-controls{display:flex;flex-wrap:wrap;gap:8px}
 .source-path-controls input{min-width:220px;flex:1;padding:9px 11px;border:1px solid var(--line);border-radius:7px;background:#171413;color:#f6eee7;font-size:11px}
 .source-path-controls select{padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:#171413;color:#f6eee7}
+
+:root{color-scheme:dark;--chart-grid:rgba(255,238,224,.08);--chart-label:rgba(245,238,231,.62)}
+:root[data-theme="light"]{color-scheme:light;color:#30251f;background:#f8f4ef;--panel:#fffaf4;--panel-2:#f5ece3;--line:rgba(83,56,40,.15);--muted:#756960;--ember:#bd4a2b;--gold:#9e5a18;--cream:#67401f;--chart-grid:rgba(83,56,40,.14);--chart-label:#756960}
+[data-theme="light"] body{background:radial-gradient(circle at 80% 0%,#f9e4d4 0,#f8f4ef 42%,#f3eee8 100%)}
+[data-theme="light"] .rail{background:rgba(255,250,244,.85)}
+[data-theme="light"] .topbar{background:rgba(248,244,239,.96)}
+[data-theme="light"] .page-panel{background:linear-gradient(145deg,#fffaf5,#f8f2eb);border-color:var(--line);box-shadow:0 18px 42px rgba(82,51,31,.08)}
+[data-theme="light"] .card{background:linear-gradient(145deg,#fffaf5,#f6eee6);box-shadow:0 18px 45px rgba(82,51,31,.07)}
+[data-theme="light"] .source-card{background:linear-gradient(150deg,#fffdf9,#f7efe7);border-color:var(--line);box-shadow:inset 0 1px #fff}
+[data-theme="light"] .settings-card{background:#fffaf5}
+[data-theme="light"] .page-panel .settings-card{background:transparent}
+[data-theme="light"] .nav-item{color:#685b51}
+[data-theme="light"] .nav-item:hover{background:rgba(135,76,40,.08);color:#30251f}
+[data-theme="light"] .nav-item.active{background:rgba(189,74,43,.12);color:#72351f}
+[data-theme="light"] .nav-icon{color:#a9522c}
+[data-theme="light"] .live-pill{color:#216c45;border-color:rgba(33,108,69,.28);background:rgba(33,108,69,.07)}
+[data-theme="light"] .rail-bottom{color:#756960}
+[data-theme="light"] .page-heading h1,[data-theme="light"] .sources-heading h1{color:#30251f}
+[data-theme="light"] .page-heading>p:last-child:not(.eyebrow):not(.sources-subtitle),[data-theme="light"] .sources-description{color:#756960}
+[data-theme="light"] .sources-subtitle,[data-theme="light"] .eyebrow,[data-theme="light"] .source-head .eyebrow{color:#9a472b}
+[data-theme="light"] .source-card p,[data-theme="light"] .source-last-read{color:#756960}
+[data-theme="light"] .source-state{color:#216c45;border-color:rgba(33,108,69,.22);background:rgba(33,108,69,.06)}
+[data-theme="light"] .source-state.notFound,[data-theme="light"] .source-state.noPermission,[data-theme="light"] .source-state.unsupported,[data-theme="light"] .source-state.readError{color:#9a472b;border-color:rgba(154,71,43,.22);background:rgba(154,71,43,.06)}
+[data-theme="light"] .source-tokens{color:#a65723}
+[data-theme="light"] .source-estimate{color:#98501d}
+[data-theme="light"] .first-run-note{color:#685b51;background:rgba(189,74,43,.05)}
+[data-theme="light"] .hero-footer b{color:#44342a}
+[data-theme="light"] .hero-footer span:last-child,[data-theme="light"] .text-button{color:#9a472b}
+[data-theme="light"] .phase-tag{color:#9a472b;border-color:rgba(154,71,43,.3)}
+[data-theme="light"] .fuel-ring{background:rgba(255,250,244,.78);border-color:rgba(154,71,43,.25);border-top-color:#bd4a2b}
+[data-theme="light"] .meter{background:#e8d9ca}
+[data-theme="light"] .mix-bar{background:#e8d9ca}
+[data-theme="light"] .legend-item,[data-theme="light"] .color-item,[data-theme="light"] .privacy-note{color:#685b51}
+[data-theme="light"] .breakdown-grid div,[data-theme="light"] .source-path-settings{background:rgba(116,69,40,.035)}
+[data-theme="light"] .settings-card select,[data-theme="light"] .settings-card input[type="number"],[data-theme="light"] .source-path-controls input,[data-theme="light"] .source-path-controls select{background:#fffdf9;color:#30251f;border-color:var(--line)}
+[data-theme="light"] .switch span{background:#d7c5b5}
+[data-theme="light"] .switch span:after{background:#fffdf9}
+[data-theme="light"] .action-button{background:rgba(189,74,43,.1);border-color:rgba(189,74,43,.28);color:#853b24}
+[data-theme="light"] .source-path-settings>small{color:#756960}
+[data-theme="light"] .error-toast{background:#fff8f2;color:#853b24;box-shadow:0 10px 35px rgba(82,51,31,.15)}
