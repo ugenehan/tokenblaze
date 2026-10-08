@@ -1,8 +1,8 @@
 //! Codex log adapter.
 //!
 //! Codex stores session logs in `~/.codex/sessions/**/*.jsonl`.
-//! Each line is a JSON object; we look for `token_usage_record` events
-//! with cumulative token counts, converting them to deltas.
+//! Each line is a JSON object; usage appears as `token_usage_record` or
+//! historical `event_msg` / `token_count` snapshots.
 
 use chrono::{DateTime, Local};
 use std::path::{Path, PathBuf};
@@ -33,17 +33,19 @@ pub fn discover_log_files_at(root: &Path, modified_since: SystemTime) -> Vec<Pat
 pub fn parse_line(line: &str, file_path: &str) -> Option<UsageEvent> {
     let val: serde_json::Value = serde_json::from_str(line).ok()?;
 
-    // Look for token_usage_record type
     let event_type = val.get("type")?.as_str()?;
-    if event_type != "token_usage_record" {
+    let payload = val.get("payload").unwrap_or(&val);
+    let legacy = event_type == "event_msg"
+        && payload.get("type").and_then(|value| value.as_str()) == Some("token_count");
+    if event_type != "token_usage_record" && !legacy {
         return None;
     }
 
-    // Current Codex session records put usage and identifiers in `payload`.
-    // Accept the historical top-level shape as well so existing logs remain
-    // readable after an upgrade.
-    let payload = val.get("payload").unwrap_or(&val);
-    let usage = payload.get("usage").or_else(|| val.get("usage"))?;
+    let usage = if legacy {
+        payload.pointer("/info/total_token_usage")?
+    } else {
+        payload.get("usage").or_else(|| val.get("usage"))?
+    };
     let input_total = token_count(usage, "input_tokens");
     let output = token_count(usage, "output_tokens");
     let cache_read = token_count(usage, "cached_input_tokens")
@@ -67,35 +69,39 @@ pub fn parse_line(line: &str, file_path: &str) -> Option<UsageEvent> {
         .and_then(parse_iso_time)
         .unwrap_or_else(Local::now);
 
-    let id = payload
-        .get("response_id")
-        .or_else(|| payload.get("message_id"))
-        .or_else(|| val.get("response_id"))
-        .or_else(|| val.get("message_id"))
-        .and_then(value_as_string)
-        .map(|value| format!("codex:{}", value))
-        .or_else(|| {
-            let session = payload
-                .get("session_id")
-                .or_else(|| val.get("session_id"))
-                .and_then(value_as_string)?;
-            let ordinal = val
-                .get("ordinal")
-                .or_else(|| payload.get("ordinal"))
-                .and_then(value_as_string)
-                .unwrap_or_else(|| timestamp_key(&timestamp));
-            Some(format!("codex:{}:{}", session, ordinal))
-        })
-        .unwrap_or_else(|| {
-            format!(
-                "codex:{}:{}:{}:{}:{}",
-                file_path,
-                timestamp_key(&timestamp),
-                total,
-                input.unwrap_or(0),
-                output.unwrap_or(0)
-            )
-        });
+    let id = if legacy {
+        format!("codex:legacy:{file_path}")
+    } else {
+        payload
+            .get("response_id")
+            .or_else(|| payload.get("message_id"))
+            .or_else(|| val.get("response_id"))
+            .or_else(|| val.get("message_id"))
+            .and_then(value_as_string)
+            .map(|value| format!("codex:{}", value))
+            .or_else(|| {
+                let session = payload
+                    .get("session_id")
+                    .or_else(|| val.get("session_id"))
+                    .and_then(value_as_string)?;
+                let ordinal = val
+                    .get("ordinal")
+                    .or_else(|| payload.get("ordinal"))
+                    .and_then(value_as_string)
+                    .unwrap_or_else(|| timestamp_key(&timestamp));
+                Some(format!("codex:{}:{}", session, ordinal))
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "codex:{}:{}:{}:{}:{}",
+                    file_path,
+                    timestamp_key(&timestamp),
+                    total,
+                    input.unwrap_or(0),
+                    output.unwrap_or(0)
+                )
+            })
+    };
 
     // Note: Codex logs can be cumulative; we treat each record as a snapshot.
     // Deduplication by id + delta calculation happens in UsageMonitor.
@@ -257,5 +263,16 @@ mod tests {
         let event = parse_line(line, "session.jsonl").expect("usage event");
         assert_eq!(event.id, "codex:legacy-1");
         assert_eq!(event.tokens, 10);
+    }
+
+    #[test]
+    fn parses_historical_token_count_snapshot() {
+        let line = r#"{"type":"event_msg","timestamp":"2026-07-20T08:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120}}}}"#;
+        let event = parse_line(line, "session.jsonl").expect("historical usage event");
+        assert_eq!(event.id, "codex:legacy:session.jsonl");
+        assert_eq!(event.tokens, 120);
+        assert_eq!(event.breakdown.input, Some(60));
+        assert_eq!(event.breakdown.cache_read, Some(40));
+        assert_eq!(event.breakdown.output, Some(20));
     }
 }

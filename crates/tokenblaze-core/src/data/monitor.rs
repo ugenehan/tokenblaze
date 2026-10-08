@@ -37,6 +37,8 @@ pub struct UsageMonitor {
     rescan_pending: bool,
     rescan_active: bool,
     source_paths: [Option<PathBuf>; 7],
+    connected_once: [bool; 7],
+    failed_scans: [u8; 7],
 
     warm_window: Duration,
 }
@@ -84,6 +86,8 @@ impl UsageMonitor {
             rescan_pending: false,
             rescan_active: false,
             source_paths: std::array::from_fn(|_| None),
+            connected_once: [false; 7],
+            failed_scans: [0; 7],
             warm_window: Duration::from_secs(4 * 60),
         }
     }
@@ -94,6 +98,13 @@ impl UsageMonitor {
 
     /// Do an initial baseline scan + warm up the fire from recent events.
     pub fn start(&mut self) {
+        for source in UsageSource::ALL {
+            self.connected_once[source.index()] = self
+                .store
+                .meta(&format!("source.connected.{}", source.index()))
+                .as_deref()
+                == Some("1");
+        }
         // Version migration for Cursor estimates
         if self.store.meta("cursor.estimate.v2").as_deref() != Some("1") {
             self.store.purge_cursor_bubble_v1();
@@ -150,6 +161,16 @@ impl UsageMonitor {
         self.enqueue_scan(true, true);
     }
 
+    pub fn clear_usage_data(&mut self) -> anyhow::Result<()> {
+        self.store.clear_usage_data()?;
+        self.reload_stats();
+        if let Some(fire) = self.fire.upgrade() {
+            fire.lock().unwrap().clear_usage();
+        }
+        self.rescan();
+        Ok(())
+    }
+
     pub fn set_source_path(&mut self, source: UsageSource, path: Option<PathBuf>) {
         self.source_paths[source.index()] = path;
         self.refresh_source_statuses();
@@ -200,6 +221,10 @@ impl UsageMonitor {
         &self.statuses
     }
 
+    pub fn needs_connection_help(&self, source: UsageSource) -> bool {
+        self.connected_once[source.index()] && self.failed_scans[source.index()] >= 3
+    }
+
     pub fn last_event(&self) -> Option<&UsageEvent> {
         self.last_event.as_ref()
     }
@@ -215,6 +240,7 @@ impl UsageMonitor {
             return;
         }
         self.refresh_source_statuses();
+        self.record_connection_health();
         let source_available = UsageSource::ALL.map(|src| {
             self.statuses
                 .get(&src)
@@ -239,6 +265,32 @@ impl UsageMonitor {
                 if rescan {
                     self.rescan_active = false;
                 }
+            }
+        }
+    }
+
+    fn record_connection_health(&mut self) {
+        for source in UsageSource::ALL {
+            let index = source.index();
+            let state = self.statuses.get(&source).map(|status| status.state);
+            if state == Some(SourceConnectionState::Ok) {
+                if !self.connected_once[index] {
+                    self.store
+                        .set_meta(&format!("source.connected.{index}"), "1");
+                }
+                self.connected_once[index] = true;
+                self.failed_scans[index] = 0;
+            } else if self.connected_once[index]
+                && matches!(
+                    state,
+                    Some(
+                        SourceConnectionState::NotFound
+                            | SourceConnectionState::NoPermission
+                            | SourceConnectionState::ReadError
+                    )
+                )
+            {
+                self.failed_scans[index] = self.failed_scans[index].saturating_add(1);
             }
         }
     }
@@ -290,6 +342,20 @@ impl UsageMonitor {
     ) {
         let mut to_store = event;
 
+        // Old cumulative snapshots establish a post-clear baseline, not new usage.
+        if to_store.timestamp.timestamp_millis() <= self.store.clear_boundary_ms() {
+            if matches!(
+                to_store.source,
+                UsageSource::ClaudeCode | UsageSource::Codex
+            ) {
+                let best = self.cumulative_best.entry(to_store.id).or_default();
+                if to_store.tokens > best.0 {
+                    *best = (to_store.tokens, to_store.breakdown);
+                }
+            }
+            return;
+        }
+
         // Claude Code and Codex records can be cumulative snapshots. Convert
         // both totals and every breakdown field to deltas before persistence.
         if matches!(
@@ -299,10 +365,16 @@ impl UsageMonitor {
             let (previous_total, previous_breakdown) =
                 match self.cumulative_best.get(&to_store.id).copied() {
                     Some(previous) => previous,
-                    None => self
-                        .store
-                        .cumulative_event_totals(&to_store.id)
-                        .unwrap_or((0, UsageBreakdown::default())),
+                    None => {
+                        let previous = self
+                            .store
+                            .cumulative_event_totals(&to_store.id)
+                            .unwrap_or((0, UsageBreakdown::default()));
+                        if previous.0 > 0 {
+                            self.cumulative_best.insert(to_store.id.clone(), previous);
+                        }
+                        previous
+                    }
                 };
             if to_store.tokens <= previous_total {
                 return;
@@ -483,7 +555,11 @@ fn scan_in_background(
     source_paths: [Option<PathBuf>; 7],
     baseline: bool,
 ) -> ScanResult {
-    let since = SystemTime::now() - Duration::from_secs(12 * 3600);
+    let since = if baseline {
+        SystemTime::UNIX_EPOCH
+    } else {
+        SystemTime::now() - Duration::from_secs(12 * 3600)
+    };
     let start_of_day_ms = start_of_day_ms();
     let watermark = store
         .meta("cursor.watermark")
@@ -498,12 +574,27 @@ fn scan_in_background(
             .map(|path| codex::discover_log_files_at(path, since))
             .unwrap_or_else(|| codex::discover_log_files(since));
         for file in files {
+            let key = format!("codex.new-format-seen:{}", file.to_string_lossy());
+            let previous = store.meta(&key);
+            let mut seen_new = !baseline && previous.as_deref() == Some("1");
             events.extend(read_jsonl_incremental(
                 &store,
                 &file,
                 baseline,
-                codex::parse_line,
+                |line, path| {
+                    let event = codex::parse_line(line, path)?;
+                    if event.id.starts_with("codex:legacy:") {
+                        (!seen_new).then_some(event)
+                    } else {
+                        seen_new = true;
+                        Some(event)
+                    }
+                },
             ));
+            let next = if seen_new { "1" } else { "0" };
+            if previous.as_deref() != Some(next) {
+                store.set_meta(&key, next);
+            }
         }
     }
 
@@ -581,15 +672,13 @@ fn scan_in_background(
     }
 
     if want(UsageSource::OpenCode) {
-        let start_watermark = start_of_day_ms.saturating_sub(1);
         let updated_after = if baseline {
-            start_watermark
+            0
         } else {
             store
                 .meta("opencode.watermark")
                 .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(start_watermark)
-                .max(start_watermark)
+                .unwrap_or(0)
         };
         match opencode::poll(updated_after) {
             Ok(result) => {
@@ -643,10 +732,10 @@ fn read_jsonl_incremental<F>(
     store: &UsageStore,
     file: &std::path::Path,
     from_start: bool,
-    parse: F,
+    mut parse: F,
 ) -> Vec<UsageEvent>
 where
-    F: Fn(&str, &str) -> Option<UsageEvent>,
+    F: FnMut(&str, &str) -> Option<UsageEvent>,
 {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -856,5 +945,124 @@ mod tests {
         let events = read_jsonl_incremental(&store, &path, false, event);
         assert_eq!(events.len(), 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn baseline_reads_old_codex_logs_without_counting_both_formats() {
+        let root = std::env::temp_dir().join(format!(
+            "tokenblaze-codex-history-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let old = |date: &str, total: i64| {
+            format!(
+                "{{\"type\":\"event_msg\",\"timestamp\":\"{date}\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"total_tokens\":{total}}}}}}}}}\n"
+            )
+        };
+        let new = |date: &str, total: i64| {
+            format!(
+                "{{\"type\":\"token_usage_record\",\"timestamp\":\"{date}\",\"payload\":{{\"response_id\":\"response-{total}\",\"usage\":{{\"total_tokens\":{total}}}}}}}\n"
+            )
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}{}{}",
+                old("2026-07-20T08:00:00Z", 120),
+                old("2026-08-20T08:00:00Z", 200),
+                new("2026-09-16T08:00:00Z", 30),
+                old("2026-09-16T08:00:01Z", 230)
+            ),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(24 * 3600)),
+            )
+            .unwrap();
+
+        let store = Arc::new(UsageStore::open_in_memory().unwrap());
+        let mut available = [false; 7];
+        available[UsageSource::Codex.index()] = true;
+        let mut paths = std::array::from_fn(|_| None);
+        paths[UsageSource::Codex.index()] = Some(root.clone());
+        let baseline = scan_in_background(store.clone(), available, paths.clone(), true);
+        assert_eq!(baseline.events.len(), 3);
+        assert_eq!(
+            baseline.events[0].timestamp.format("%Y-%m").to_string(),
+            "2026-07"
+        );
+        assert_eq!(
+            baseline.events[1].timestamp.format("%Y-%m").to_string(),
+            "2026-08"
+        );
+        assert_eq!(baseline.events[2].id, "codex:response-30");
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}{}",
+                    old("2026-09-16T08:01:00Z", 250),
+                    new("2026-09-16T08:01:01Z", 50)
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let incremental = scan_in_background(store, available, paths, false);
+        assert_eq!(incremental.events.len(), 1);
+        assert_eq!(incremental.events[0].id, "codex:response-50");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prior_connection_needs_three_failed_checks() {
+        let store = Arc::new(UsageStore::open_in_memory().unwrap());
+        let mut monitor = UsageMonitor::new(store.clone());
+        let source = UsageSource::Codex;
+        monitor.statuses.get_mut(&source).unwrap().state = SourceConnectionState::Ok;
+        monitor.record_connection_health();
+        assert_eq!(store.meta("source.connected.1").as_deref(), Some("1"));
+        monitor.statuses.get_mut(&source).unwrap().state = SourceConnectionState::NotFound;
+        monitor.record_connection_health();
+        monitor.record_connection_health();
+        assert!(!monitor.needs_connection_help(source));
+        monitor.record_connection_health();
+        assert!(monitor.needs_connection_help(source));
+        monitor.statuses.get_mut(&source).unwrap().state = SourceConnectionState::Ok;
+        monitor.record_connection_health();
+        assert!(!monitor.needs_connection_help(source));
+    }
+
+    #[test]
+    fn clear_uses_old_cumulative_snapshot_only_as_baseline() {
+        let store = Arc::new(UsageStore::open_in_memory().unwrap());
+        let mut monitor = UsageMonitor::new(store.clone());
+        let mut old = event("complete", "test").unwrap();
+        old.tokens = 100;
+        old.breakdown.input = Some(70);
+        old.breakdown.output = Some(30);
+        monitor.apply_event(old.clone(), chrono::Local::now(), false);
+        store.clear_usage_data().unwrap();
+        monitor.cumulative_best.clear();
+        monitor.apply_event(old.clone(), chrono::Local::now(), false);
+        let mut next = old;
+        next.timestamp = chrono::Local::now() + chrono::Duration::seconds(1);
+        next.tokens = 130;
+        next.breakdown.input = Some(90);
+        next.breakdown.output = Some(40);
+        monitor.apply_event(next, chrono::Local::now(), false);
+        assert_eq!(store.today_totals().unwrap().0, 30);
     }
 }

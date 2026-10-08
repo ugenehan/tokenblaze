@@ -10,12 +10,14 @@ function applyTheme() {
 }
 systemTheme.addEventListener('change', applyTheme);
 const labels = {
-  English: { today: 'TODAY', minute: '/ min', footer: 'Updated just now · Usage stays on this device', empty: 'No token usage today' },
-  Chinese: { today: '今日燃烧', minute: '/ 分钟', footer: '刚刚更新 · 数据只保存在本机', empty: '今日暂无 Token 消耗' },
-  Japanese: { today: '本日の使用量', minute: '/ 分', footer: '更新済み · データはこの端末内に保存', empty: '本日のトークン使用はありません' },
-  Korean: { today: '오늘 사용량', minute: '/ 분', footer: '방금 업데이트 · 데이터는 이 기기에만 저장', empty: '오늘 토큰 사용량이 없습니다' },
+  English: { today: 'TODAY', minute: '/ min', footer: 'Updated just now · Usage stays on this device', budget: 'Estimated budget reached · Not a bill', empty: 'No token usage today' },
+  Chinese: { today: '今日燃烧', minute: '/ 分钟', footer: '刚刚更新 · 数据只保存在本机', budget: '估算成本已达预算 · 非账单', empty: '今日暂无 Token 消耗' },
+  Japanese: { today: '本日の使用量', minute: '/ 分', footer: '更新済み · データはこの端末内に保存', budget: '推定予算に到達 · 請求額ではありません', empty: '本日のトークン使用はありません' },
+  Korean: { today: '오늘 사용량', minute: '/ 분', footer: '방금 업데이트 · 데이터는 이 기기에만 저장', budget: '예상 예산 도달 · 청구 금액 아님', empty: '오늘 토큰 사용량이 없습니다' },
 };
 let busy = false;
+let budgetExceeded = false;
+let lastBudgetCheck = 0;
 let requestedExpanded = false;
 let windowExpanded = false;
 let hoverTimer;
@@ -28,14 +30,18 @@ const compact = (value) => new Intl.NumberFormat('en-US', {
 function renderSummary(state) {
   selectedTheme = state.theme || 'Dark';
   applyTheme();
-  const copy = labels[state.language] || labels.English;
+  const language = state.language === 'System'
+    ? ({ zh: 'Chinese', ja: 'Japanese', ko: 'Korean' }[navigator.language.slice(0, 2).toLowerCase()] || 'English')
+    : state.language;
+  const copy = labels[language] || labels.English;
+  document.documentElement.lang = { Chinese: 'zh-CN', Japanese: 'ja', Korean: 'ko' }[language] || 'en';
   const sizeScale = state.config?.flameSize === 'Small' ? 1
     : state.config?.flameSize === 'Large' ? 2.75 : 1.75;
   flameZone.style.setProperty('--flame-width', `${56 * sizeScale + 28}px`);
   flameZone.style.setProperty('--flame-height', `${96 * sizeScale + 36}px`);
   document.getElementById('today-label').textContent = copy.today;
   document.getElementById('daily-total').textContent = compact(state.todayTokens);
-  document.getElementById('card-footer').textContent = copy.footer;
+  document.getElementById('card-footer').textContent = budgetExceeded ? copy.budget : copy.footer;
 
   const rate = state.showLiveRate ? Number(state.fire?.tokens_per_second || 0) * 60 : 0;
   document.getElementById('live-rate').textContent = rate > 0
@@ -118,6 +124,15 @@ async function updateFireState() {
       const state = await invoke('fire_visual_state');
       renderer.setState(state);
       renderSummary(state);
+      if (Date.now() - lastBudgetCheck >= 60000) {
+        const summary = await invoke('cost_summary');
+        lastBudgetCheck = Date.now();
+        budgetExceeded = Boolean(summary && ((summary.dailyBudgetUsd != null && summary.today.usd >= summary.dailyBudgetUsd)
+          || (summary.weeklyBudgetUsd != null && summary.week.usd >= summary.weeklyBudgetUsd)));
+        panel.classList.toggle('over-budget', budgetExceeded);
+        document.getElementById('card-footer').textContent = budgetExceeded
+          ? (labels[state.language] || labels.English).budget : (labels[state.language] || labels.English).footer;
+      }
     } catch (error) {
       console.error('flame state failed', error);
     } finally {

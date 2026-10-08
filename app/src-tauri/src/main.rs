@@ -1,12 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Wry};
 use tauri_plugin_store::{Store, StoreExt};
-use tokenblaze_core::config::{AppConfig, AppTheme};
+use tokenblaze_core::config::{AppConfig, AppTheme, CostRates};
 use tokenblaze_core::data::snapshot::{self, DashboardSnapshot, FireView};
 use tokenblaze_core::data::{UsageMonitor, UsageSource, UsageStore};
 use tokenblaze_core::fire::{
@@ -78,6 +79,7 @@ extern "system" {
 
 struct AppState {
     monitor: Mutex<UsageMonitor>,
+    usage_store: Arc<UsageStore>,
     fire: Arc<Mutex<FireStateMachine>>,
     renderer: Mutex<FireRenderer>,
     config: Mutex<AppConfig>,
@@ -90,11 +92,39 @@ struct AppState {
 
 struct TrayItems {
     toggle_flame: tauri::menu::MenuItem<Wry>,
+    today_usage: tauri::menu::MenuItem<Wry>,
     open_console: tauri::menu::MenuItem<Wry>,
     reset_position: tauri::menu::MenuItem<Wry>,
     toggle_pause: tauri::menu::MenuItem<Wry>,
     check_updates: tauri::menu::MenuItem<Wry>,
     quit: tauri::menu::MenuItem<Wry>,
+}
+
+fn refresh_tray_usage(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Ok((tokens, by_source)) = state.usage_store.today_totals() else {
+        return;
+    };
+    let active_sources = by_source.iter().filter(|tokens| **tokens > 0).count();
+    let language = match state.config.lock() {
+        Ok(config) => config.language.effective(),
+        Err(_) => return,
+    };
+    let summary = format!(
+        "{}: {} · {}: {}",
+        t("menu.todayUsage", language),
+        tokens,
+        t("menu.activeSources", language),
+        active_sources
+    );
+    if let Ok(items) = state.tray_items.lock() {
+        if let Some(items) = items.as_ref() {
+            let _ = items.today_usage.set_text(&summary);
+        }
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(format!("TokenBlaze · {summary}")));
+    }
 }
 
 struct FireRenderer {
@@ -120,27 +150,40 @@ struct FireVisualState {
     sources: Vec<snapshot::SourceView>,
     language: String,
     theme: String,
+    config: FlameConfigView,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlameConfigView {
+    flame_size: String,
+    source_colors: [[u8; 3]; 7],
 }
 
 impl AppState {
     fn initialize(settings_store: Arc<Store<Wry>>) -> anyhow::Result<Self> {
-        let config: AppConfig = settings_store
+        let mut config: AppConfig = settings_store
             .get(SETTINGS_KEY)
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
+        if !matches!(config.retention_days, 0 | 30 | 90 | 365) {
+            config.retention_days = 0;
+        }
         SourceFlameColors::set_all(config.source_colors);
 
         let fire = Arc::new(Mutex::new(FireStateMachine::new()));
         fire.lock().expect("fire mutex poisoned").reduce_motion = config.reduce_motion;
 
         let store = Arc::new(UsageStore::open()?);
-        let mut monitor = UsageMonitor::new(store);
+        store.set_retention_days(config.retention_days)?;
+        let mut monitor = UsageMonitor::new(store.clone());
         monitor.configure_source_paths(&config.source_paths);
         monitor.attach_fire(&fire);
         monitor.start();
 
         Ok(Self {
             monitor: Mutex::new(monitor),
+            usage_store: store,
             fire,
             renderer: Mutex::new(FireRenderer {
                 engine: FireEngine::new(),
@@ -185,6 +228,16 @@ impl AppState {
             .map_err(|_| "config mutex poisoned")?
             .token_poll_interval_seconds
             .clamp(1, 10);
+        let scan_interval = if self
+            .fire
+            .lock()
+            .map_err(|_| "fire mutex poisoned")?
+            .animation_paused
+        {
+            scan_interval.max(15)
+        } else {
+            scan_interval
+        };
         let scan_due = {
             let mut last_scan = self
                 .last_monitor_scan
@@ -207,7 +260,7 @@ impl AppState {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, String> {
     state.tick()?;
     let monitor = state.monitor.lock().map_err(|_| "monitor mutex poisoned")?;
@@ -220,7 +273,107 @@ fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, S
     Ok(dashboard)
 }
 
+#[tauri::command(async)]
+fn usage_history(
+    days: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<snapshot::DailyPoint>, String> {
+    if !matches!(days, 30 | 90) {
+        return Err("invalid history range".to_string());
+    }
+    state
+        .usage_store
+        .daily_usage(days)
+        .map_err(|error| error.to_string())
+        .map(|days| {
+            days.into_iter()
+                .map(|day| snapshot::DailyPoint {
+                    date: day.date,
+                    tokens: day.tokens,
+                })
+                .collect()
+        })
+}
+
 #[tauri::command]
+fn export_usage_events(
+    days: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<tokenblaze_core::data::store::ExportUsageEvent>, String> {
+    state
+        .usage_store
+        .export_events(days)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CostSummary {
+    today: tokenblaze_core::data::store::CostEstimate,
+    week: tokenblaze_core::data::store::CostEstimate,
+    daily_budget_usd: Option<f64>,
+    weekly_budget_usd: Option<f64>,
+}
+
+#[tauri::command(async)]
+fn cost_summary(state: State<'_, AppState>) -> Result<Option<CostSummary>, String> {
+    let config = state.config.lock().map_err(|_| "config mutex poisoned")?;
+    if !config.cost_enabled {
+        return Ok(None);
+    }
+    let rates = config.cost_rates;
+    let daily_budget_usd = config.daily_budget_usd;
+    let weekly_budget_usd = config.weekly_budget_usd;
+    drop(config);
+    Ok(Some(CostSummary {
+        today: state
+            .usage_store
+            .estimate_cost(1, &rates)
+            .map_err(|error| error.to_string())?,
+        week: state
+            .usage_store
+            .estimate_cost(7, &rates)
+            .map_err(|error| error.to_string())?,
+        daily_budget_usd,
+        weekly_budget_usd,
+    }))
+}
+
+#[tauri::command]
+fn set_cost_settings(
+    enabled: bool,
+    rates: [CostRates; 7],
+    daily_budget_usd: Option<f64>,
+    weekly_budget_usd: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let valid = |price: Option<f64>| {
+        price.is_none_or(|value| value.is_finite() && (0.0..=1_000_000.0).contains(&value))
+    };
+    let valid_budget = |budget: Option<f64>| {
+        budget.is_none_or(|value| value.is_finite() && value > 0.0 && value <= 1_000_000.0)
+    };
+    if !valid_budget(daily_budget_usd)
+        || !valid_budget(weekly_budget_usd)
+        || rates.iter().any(|rate| {
+            !valid(rate.input)
+                || !valid(rate.output)
+                || !valid(rate.cache_read)
+                || !valid(rate.cache_write)
+        })
+    {
+        return Err("invalid price or budget".to_string());
+    }
+    state.update_config(|config| {
+        config.cost_enabled = enabled;
+        config.cost_rates = rates;
+        config.daily_budget_usd = daily_budget_usd;
+        config.weekly_budget_usd = weekly_budget_usd;
+    })?;
+    Ok(())
+}
+
+#[tauri::command(async)]
 fn fire_visual_state(state: State<'_, AppState>) -> Result<FireVisualState, String> {
     state.tick()?;
     let monitor = state.monitor.lock().map_err(|_| "monitor mutex poisoned")?;
@@ -235,6 +388,10 @@ fn fire_visual_state(state: State<'_, AppState>) -> Result<FireVisualState, Stri
         sources: dashboard.sources,
         language: dashboard.config.language,
         theme: dashboard.config.theme,
+        config: FlameConfigView {
+            flame_size: dashboard.config.flame_size,
+            source_colors: dashboard.config.source_colors,
+        },
     })
 }
 
@@ -524,6 +681,8 @@ fn set_language(
             .set_text(t("menu.quit", language))
             .map_err(|error| error.to_string())?;
     }
+    drop(items);
+    refresh_tray_usage(&app);
     if let Some(window) = app.get_webview_window("flame") {
         let _ = window.emit("language-changed", language.label());
     }
@@ -581,6 +740,40 @@ fn rescan(state: State<'_, AppState>) -> Result<(), String> {
         .lock()
         .map_err(|_| "monitor mutex poisoned")?
         .rescan();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_retention_days(days: u32, state: State<'_, AppState>) -> Result<(), String> {
+    if !matches!(days, 0 | 30 | 90 | 365) {
+        return Err("invalid retention period".to_string());
+    }
+    state.update_config(|config| config.retention_days = days)?;
+    state
+        .usage_store
+        .set_retention_days(days)
+        .map_err(|error| error.to_string())?;
+    state
+        .monitor
+        .lock()
+        .map_err(|_| "monitor mutex poisoned")?
+        .rescan();
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_usage_data(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .monitor
+        .lock()
+        .map_err(|_| "monitor mutex poisoned")?
+        .clear_usage_data()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn complete_onboarding(state: State<'_, AppState>) -> Result<(), String> {
+    state.update_config(|config| config.onboarding_complete = true)?;
     Ok(())
 }
 
@@ -710,6 +903,22 @@ fn dismiss_update(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|_| "updater mutex poisoned")?
         .dismiss();
     Ok(())
+}
+
+#[tauri::command]
+fn open_releases() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(tokenblaze_core::updater::releases_url())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("release page opening is unavailable on this platform".to_string())
+    }
 }
 
 #[tauri::command]
@@ -1021,6 +1230,12 @@ fn main() {
                 .map_err(|_| "updater mutex poisoned")?
                 .check();
             app.manage(state);
+            let background_app = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(15));
+                let _ = background_app.state::<AppState>().tick();
+                refresh_tray_usage(&background_app);
+            });
 
             let toggle_flame = tauri::menu::MenuItem::with_id(
                 app,
@@ -1041,6 +1256,13 @@ fn main() {
                 "open-console",
                 t("menu.openConsole", lang),
                 true,
+                None::<&str>,
+            )?;
+            let today_usage = tauri::menu::MenuItem::with_id(
+                app,
+                "today-usage",
+                t("menu.todayUsage", lang),
+                false,
                 None::<&str>,
             )?;
             let reset_position = tauri::menu::MenuItem::with_id(
@@ -1079,6 +1301,7 @@ fn main() {
                 &[
                     &toggle_flame,
                     &separator_1,
+                    &today_usage,
                     &open_console,
                     &reset_position,
                     &toggle_pause,
@@ -1094,6 +1317,7 @@ fn main() {
                 .map_err(|_| "tray menu mutex poisoned")?
                 .replace(TrayItems {
                     toggle_flame: toggle_flame.clone(),
+                    today_usage: today_usage.clone(),
                     open_console: open_console.clone(),
                     reset_position: reset_position.clone(),
                     toggle_pause: toggle_pause.clone(),
@@ -1103,7 +1327,7 @@ fn main() {
             let toggle_flame_for_event = toggle_flame.clone();
             let toggle_pause_for_event = toggle_pause.clone();
             let icon = tauri::image::Image::new_owned(flame_icon_rgba(), 16, 16);
-            tauri::tray::TrayIconBuilder::new()
+            tauri::tray::TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .tooltip("TokenBlaze")
                 .menu(&menu)
@@ -1197,10 +1421,15 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            refresh_tray_usage(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             dashboard_snapshot,
+            usage_history,
+            export_usage_events,
+            cost_summary,
+            set_cost_settings,
             initialize_flame_window,
             fire_visual_state,
             fire_frame,
@@ -1216,6 +1445,9 @@ fn main() {
             set_source_color,
             reset_source_colors,
             rescan,
+            set_retention_days,
+            clear_usage_data,
+            complete_onboarding,
             set_source_path,
             set_animation_paused,
             show_preview,
@@ -1225,6 +1457,7 @@ fn main() {
             check_updates,
             download_update,
             dismiss_update,
+            open_releases,
             install_update,
             open_console,
             start_dragging,

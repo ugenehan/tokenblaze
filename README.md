@@ -146,7 +146,7 @@ Verify that Rust/Cargo and Node.js/npm are available in PowerShell, then install
 - Source discovery depends on each tool's local file and database formats, which may change upstream.
 - TokenBlaze does not validate local counts against provider billing records.
 - Cursor can report estimates when exact usage records are unavailable.
-- The update checker targets this repository main/appcast.xml feed and GitHub Releases page. This checkout does not yet contain appcast.xml, so online checks will fail until the feed is published. Update delivery also requires a valid signed Windows release entry.
+- The update checker targets this repository main/appcast.xml feed and GitHub Releases page. This checkout does not yet contain appcast.xml, so online checks will fail until the feed is published. Update delivery also requires a valid signed Windows release entry. After signing the raw `tokenblaze.exe` (not the NSIS installer) with the matching Ed25519 key, `cargo run -p tokenblaze-core --bin appcast_release -- VERSION PATH_TO_EXE RELEASE_ASSET_URL PATH_TO_BASE64_SIGNATURE` verifies the detached signature and prints an appcast entry for review. It does not publish a release or feed.
 - The current installer configuration targets Windows NSIS; macOS and Linux packaging are not configured here.
 
 ## License

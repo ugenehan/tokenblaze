@@ -146,7 +146,7 @@ Cursor 数据接入会根据本机数据情况选择仪表盘记录或本地估�
 - 数据源发现依赖各工具的本地文件和数据库格式，上游格式变化可能导致适配失效。
 - TokenBlaze 不会将本地统计与服务商账单进行核对。
 - 缺少精确用量记录时，Cursor 可能显示估算值。
-- 更新器指向本仓库 main/appcast.xml 清单和 GitHub Releases 页面。当前检出中尚无 appcast.xml，因此发布该清单前在线检查会失败。实际交付更新还需要有效的签名 Windows 版本条目。
+- 更新器指向本仓库 main/appcast.xml 清单和 GitHub Releases 页面。当前检出中尚无 appcast.xml，因此发布该清单前在线检查会失败。实际交付更新还需要有效的签名 Windows 版本条目。使用匹配的 Ed25519 密钥对原始 `tokenblaze.exe`（不是 NSIS 安装程序）签名后，可运行 `cargo run -p tokenblaze-core --bin appcast_release -- VERSION PATH_TO_EXE RELEASE_ASSET_URL PATH_TO_BASE64_SIGNATURE` 校验独立签名并输出供审核的 appcast 条目；该命令不会发布版本或清单。
 - 当前安装包配置面向 Windows NSIS，尚未配置 macOS 或 Linux 安装包。
 
 ## 许可证

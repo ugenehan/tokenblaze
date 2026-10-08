@@ -7,10 +7,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, Timelike, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use super::{HourlyUsage, UsageBreakdown, UsageEvent, UsageSource};
+use crate::config::CostRates;
 
 fn local_start_of_day() -> DateTime<Local> {
     Local::now()
@@ -24,14 +27,33 @@ fn local_start_of_day() -> DateTime<Local> {
 
 pub struct UsageStore {
     db: Mutex<Connection>,
-    /// In-memory cache of known event IDs to avoid SELECT-per-event.
-    known_ids: Mutex<std::collections::HashSet<String>>,
+    retention_days: AtomicU32,
+    cleared_before_ms: AtomicI64,
 }
 
 #[derive(Debug, Clone)]
 pub struct DailyUsage {
     pub date: String,
     pub tokens: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportUsageEvent {
+    pub source: String,
+    pub timestamp: String,
+    pub tokens: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub is_estimated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostEstimate {
+    pub usd: f64,
+    pub incomplete: bool,
 }
 
 impl UsageStore {
@@ -49,10 +71,11 @@ impl UsageStore {
 
         let store = UsageStore {
             db: Mutex::new(conn),
-            known_ids: Mutex::new(std::collections::HashSet::new()),
+            retention_days: AtomicU32::new(0),
+            cleared_before_ms: AtomicI64::new(0),
         };
         store.migrate()?;
-        store.warm_id_cache()?;
+        store.load_clear_boundary()?;
         Ok(store)
     }
 
@@ -63,7 +86,8 @@ impl UsageStore {
         Self::configure_connection(&conn)?;
         let store = UsageStore {
             db: Mutex::new(conn),
-            known_ids: Mutex::new(std::collections::HashSet::new()),
+            retention_days: AtomicU32::new(0),
+            cleared_before_ms: AtomicI64::new(0),
         };
         store.migrate()?;
         Ok(store)
@@ -143,15 +167,59 @@ impl UsageStore {
         Ok(())
     }
 
-    fn warm_id_cache(&self) -> Result<()> {
+    fn load_clear_boundary(&self) -> Result<()> {
         let db = self.db.lock().unwrap();
-        let mut cache = self.known_ids.lock().unwrap();
-        let cutoff = (Local::now() - Duration::days(90)).timestamp_millis() as f64 / 1000.0;
-        let mut stmt = db.prepare("SELECT id FROM usage_events WHERE inserted_at >= ?;")?;
-        let rows = stmt.query_map(params![cutoff], |row| row.get::<_, String>(0))?;
-        for id in rows {
-            cache.insert(id?);
+        let value: Option<String> = db
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'usage.cleared_before_ms'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        self.cleared_before_ms.store(
+            value.and_then(|value| value.parse().ok()).unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        Ok(())
+    }
+
+    pub fn clear_boundary_ms(&self) -> i64 {
+        self.cleared_before_ms.load(Ordering::Relaxed)
+    }
+
+    /// Remove expired events and prevent a later source rescan from restoring them.
+    pub fn set_retention_days(&self, days: u32) -> Result<()> {
+        anyhow::ensure!(
+            matches!(days, 0 | 30 | 90 | 365),
+            "invalid retention period"
+        );
+        let db = self.db.lock().unwrap();
+        if days != 0 {
+            let cutoff =
+                (Local::now() - Duration::days(i64::from(days))).timestamp_millis() as f64 / 1000.0;
+            db.execute(
+                "DELETE FROM usage_events WHERE timestamp < ?1",
+                params![cutoff],
+            )?;
         }
+        self.retention_days.store(days, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Forget stored usage and its scan state. The boundary prevents old source logs from refilling it.
+    pub fn clear_usage_data(&self) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let boundary = Local::now().timestamp_millis();
+        let transaction = db.transaction()?;
+        transaction.execute("DELETE FROM usage_events", [])?;
+        transaction.execute("DELETE FROM file_cursors", [])?;
+        transaction.execute("DELETE FROM meta", [])?;
+        transaction.execute(
+            "INSERT INTO meta(key, value) VALUES('usage.cleared_before_ms', ?1)",
+            params![boundary.to_string()],
+        )?;
+        transaction.commit()?;
+        self.cleared_before_ms.store(boundary, Ordering::Relaxed);
         Ok(())
     }
 
@@ -159,16 +227,16 @@ impl UsageStore {
 
     /// Insert a usage event. Returns true if it was new (not duplicate).
     pub fn insert_event(&self, event: &UsageEvent) -> Result<bool> {
-        // Fast path: check memory cache first
-        {
-            let cache = self.known_ids.lock().unwrap();
-            if cache.contains(&event.id) {
-                return Ok(false);
-            }
-        }
-
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare(
+        let event_ms = event.timestamp.timestamp_millis();
+        let retention_days = self.retention_days.load(Ordering::Relaxed);
+        let expired = retention_days != 0
+            && event_ms
+                < (Local::now() - Duration::days(i64::from(retention_days))).timestamp_millis();
+        if event_ms <= self.cleared_before_ms.load(Ordering::Relaxed) || expired {
+            return Ok(false);
+        }
+        let mut stmt = db.prepare_cached(
             r#"
             INSERT OR IGNORE INTO usage_events
             (id, source, timestamp, tokens, input_tokens, output_tokens,
@@ -192,19 +260,17 @@ impl UsageStore {
             now,
         ])?;
 
-        let inserted = changes > 0;
-        if inserted {
-            let mut cache = self.known_ids.lock().unwrap();
-            cache.insert(event.id.clone());
-        }
-
-        Ok(inserted)
+        Ok(changes > 0)
     }
 
     /// Reconstruct the latest cumulative snapshot stored as one base event
     /// followed by `#<snapshot total>` delta events.
     pub fn cumulative_event_totals(&self, base_id: &str) -> Result<(i64, UsageBreakdown)> {
         let db = self.db.lock().unwrap();
+        // '#' and '$' are adjacent in SQLite's default BINARY ordering.
+        // This range matches the literal delta prefix using the primary-key index.
+        let delta_start = format!("{base_id}#");
+        let delta_end = format!("{base_id}$");
         let (tokens, input, output, cache_read, cache_write) = db.query_row(
             r#"
             SELECT
@@ -214,9 +280,9 @@ impl UsageStore {
                 COALESCE(SUM(cache_read), 0),
                 COALESCE(SUM(cache_write), 0)
             FROM usage_events
-            WHERE id = ?1 OR substr(id, 1, length(?1) + 1) = ?1 || '#'
+            WHERE id = ?1 OR (id >= ?2 AND id < ?3)
             "#,
-            params![base_id],
+            params![base_id, delta_start, delta_end],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -247,10 +313,7 @@ impl UsageStore {
 
         let mut ids = std::collections::HashSet::new();
         for id in rows {
-            let id = id?;
-            ids.insert(id.clone());
-            let mut cache = self.known_ids.lock().unwrap();
-            cache.insert(id);
+            ids.insert(id?);
         }
         Ok(ids)
     }
@@ -348,14 +411,20 @@ impl UsageStore {
 
     /// Daily totals for today and the six preceding local calendar days.
     pub fn last_seven_days(&self) -> Result<Vec<DailyUsage>> {
+        self.daily_usage(7)
+    }
+
+    /// Daily totals for a bounded number of local calendar days.
+    pub fn daily_usage(&self, count: u32) -> Result<Vec<DailyUsage>> {
+        anyhow::ensure!((1..=90).contains(&count), "invalid history range");
         let today = Local::now().date_naive();
         let db = self.db.lock().unwrap();
         let mut stmt = db.prepare(
             "SELECT COALESCE(SUM(tokens), 0) FROM usage_events WHERE timestamp >= ?1 AND timestamp < ?2",
         )?;
-        let mut days = Vec::with_capacity(7);
-        for age in (0..7).rev() {
-            let date = today - Duration::days(age);
+        let mut days = Vec::with_capacity(count as usize);
+        for age in (0..count).rev() {
+            let date = today - Duration::days(i64::from(age));
             let next = date + Duration::days(1);
             let local_start = |day: chrono::NaiveDate| {
                 day.and_time(chrono::NaiveTime::MIN)
@@ -374,6 +443,94 @@ impl UsageStore {
             });
         }
         Ok(days)
+    }
+
+    /// Export a bounded period without event IDs or local file paths.
+    pub fn export_events(&self, days: u32) -> Result<Vec<ExportUsageEvent>> {
+        anyhow::ensure!(matches!(days, 7 | 30 | 90), "invalid export range");
+        let cutoff = (local_start_of_day() - Duration::days(i64::from(days - 1))).timestamp_millis()
+            as f64
+            / 1000.0;
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT source, timestamp, tokens, input_tokens, output_tokens, cache_read, cache_write, is_estimated \
+             FROM usage_events WHERE timestamp >= ?1 ORDER BY timestamp ASC LIMIT 100001",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            let timestamp: f64 = row.get(1)?;
+            Ok(ExportUsageEvent {
+                source: row.get(0)?,
+                timestamp: DateTime::<Utc>::from_timestamp_millis((timestamp * 1000.0) as i64)
+                    .map(|date| date.to_rfc3339())
+                    .unwrap_or_default(),
+                tokens: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read: row.get(5)?,
+                cache_write: row.get(6)?,
+                is_estimated: row.get::<_, i32>(7)? != 0,
+            })
+        })?;
+        let events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(events.len() <= 100000, "too many events to export at once");
+        Ok(events)
+    }
+
+    /// Estimate cost using user supplied USD prices per million tokens.
+    pub fn estimate_cost(&self, days: u32, rates: &[CostRates; 7]) -> Result<CostEstimate> {
+        anyhow::ensure!(matches!(days, 1 | 7), "invalid cost range");
+        let cutoff = (local_start_of_day() - Duration::days(i64::from(days - 1))).timestamp_millis()
+            as f64
+            / 1000.0;
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT source, COALESCE(SUM(tokens), 0), \
+             COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+             COALESCE(SUM(cache_read), 0), COALESCE(SUM(cache_write), 0) \
+             FROM usage_events WHERE timestamp >= ?1 GROUP BY source",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                [
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ],
+            ))
+        })?;
+        let mut estimate = CostEstimate {
+            usd: 0.0,
+            incomplete: false,
+        };
+        for row in rows {
+            let (source, tokens, amounts) = row?;
+            let Some(source) = UsageSource::from_str(&source) else {
+                estimate.incomplete = true;
+                continue;
+            };
+            let rate = rates[source.index()];
+            for (amount, price) in amounts.into_iter().zip([
+                rate.input,
+                rate.output,
+                rate.cache_read,
+                rate.cache_write,
+            ]) {
+                if amount > 0 {
+                    if let Some(price) = price {
+                        estimate.usd += amount as f64 * price / 1_000_000.0;
+                    } else {
+                        estimate.incomplete = true;
+                    }
+                }
+            }
+            if amounts.iter().sum::<i64>() != tokens {
+                estimate.incomplete = true;
+            }
+        }
+        Ok(estimate)
     }
 
     /// Today's token breakdown (input / output / cache).
@@ -543,10 +700,6 @@ impl UsageStore {
             [],
         )
         .ok();
-        let mut cache = self.known_ids.lock().unwrap();
-        cache.retain(|id| {
-            !(id.starts_with("cursor:bubble:") && !id.starts_with("cursor:bubble:v2:"))
-        });
     }
 
     /// Drop all Cursor local estimates when Dashboard API becomes authoritative.
@@ -557,8 +710,6 @@ impl UsageStore {
             [],
         )
         .ok();
-        let mut cache = self.known_ids.lock().unwrap();
-        cache.retain(|id| !id.starts_with("cursor:bubble:"));
     }
 }
 
@@ -689,5 +840,108 @@ mod tests {
         assert_eq!(tokens, 150);
         assert_eq!(breakdown.input, Some(70));
         assert_eq!(breakdown.output, Some(80));
+    }
+
+    #[test]
+    fn cumulative_snapshot_prefix_is_literal_and_excludes_neighboring_ids() {
+        let store = UsageStore::open_in_memory().unwrap();
+        let base = "codex:session_%:中文";
+        for (id, tokens) in [
+            (base.to_string(), 100),
+            (format!("{base}#150"), 50),
+            (format!("{base}#200"), 50),
+            (format!("{base}$200"), 900),
+            (format!("{base}-other#200"), 900),
+            ("codex:session_AB:中文#200".to_string(), 900),
+        ] {
+            store
+                .insert_event(&sample_event(&id, UsageSource::Codex, tokens))
+                .unwrap();
+        }
+        assert_eq!(store.cumulative_event_totals(base).unwrap().0, 200);
+        assert_eq!(store.cumulative_event_totals("missing").unwrap().0, 0);
+    }
+
+    #[test]
+    fn retention_removes_old_events_and_blocks_rescan_reimport() {
+        let store = UsageStore::open_in_memory().unwrap();
+        let mut old = sample_event("old", UsageSource::Codex, 100);
+        old.timestamp = Local::now() - Duration::days(40);
+        assert!(store.insert_event(&old).unwrap());
+        store.set_retention_days(30).unwrap();
+        assert!(!store.insert_event(&old).unwrap());
+        let count: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn clear_blocks_old_log_reimport_but_accepts_new_usage() {
+        let store = UsageStore::open_in_memory().unwrap();
+        let old = sample_event("before-clear", UsageSource::Codex, 100);
+        store.insert_event(&old).unwrap();
+        store.clear_usage_data().unwrap();
+        assert!(!store.insert_event(&old).unwrap());
+        let mut new = sample_event("after-clear", UsageSource::Codex, 200);
+        new.timestamp = Local::now() + Duration::seconds(1);
+        assert!(store.insert_event(&new).unwrap());
+        assert_eq!(store.today_totals().unwrap().0, 200);
+    }
+
+    #[test]
+    fn export_excludes_paths_and_old_events() {
+        let store = UsageStore::open_in_memory().unwrap();
+        let mut old = sample_event("old", UsageSource::Codex, 100);
+        old.timestamp = Local::now() - Duration::days(40);
+        store.insert_event(&old).unwrap();
+        store
+            .insert_event(&sample_event("recent", UsageSource::Codex, 200))
+            .unwrap();
+        let events = store.export_events(7).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tokens, 200);
+        let json = serde_json::to_string(&events).unwrap();
+        assert!(!json.contains("/test/log.jsonl"));
+        assert!(!json.contains("recent"));
+    }
+
+    #[test]
+    fn daily_usage_returns_requested_calendar_days() {
+        let store = UsageStore::open_in_memory().unwrap();
+        store
+            .insert_event(&sample_event("today", UsageSource::Pi, 320))
+            .unwrap();
+        let days = store.daily_usage(30).unwrap();
+        assert_eq!(days.len(), 30);
+        assert_eq!(days.last().unwrap().tokens, 320);
+        assert_eq!(days[..29].iter().map(|day| day.tokens).sum::<i64>(), 0);
+    }
+
+    #[test]
+    fn cost_estimate_marks_missing_prices_and_breakdowns() {
+        let store = UsageStore::open_in_memory().unwrap();
+        let mut rates = [CostRates::default(); 7];
+        rates[UsageSource::Codex.index()].input = Some(2.0);
+        rates[UsageSource::Codex.index()].output = Some(8.0);
+        store
+            .insert_event(&sample_event("priced", UsageSource::Codex, 1_000_000))
+            .unwrap();
+        let complete = store.estimate_cost(1, &rates).unwrap();
+        assert!((complete.usd - 5.0).abs() < 1e-9);
+        assert!(!complete.incomplete);
+
+        rates[UsageSource::Codex.index()].output = None;
+        let missing_price = store.estimate_cost(1, &rates).unwrap();
+        assert!((missing_price.usd - 1.0).abs() < 1e-9);
+        assert!(missing_price.incomplete);
+
+        let mut unclassified = sample_event("unclassified", UsageSource::Codex, 100);
+        unclassified.breakdown = UsageBreakdown::default();
+        store.insert_event(&unclassified).unwrap();
+        assert!(store.estimate_cost(1, &rates).unwrap().incomplete);
     }
 }

@@ -138,6 +138,8 @@ html, body {
 }
 
 #fire { display: block; width: 100%; height: 100%; }
+.flame-panel.over-budget #fire { filter: hue-rotate(160deg) saturate(1.2); }
+.flame-panel.over-budget .card-footer { color: #e37c68; }
 
 @media (prefers-reduced-motion: reduce) {
   .hover-card { transition-duration: 1ms; }

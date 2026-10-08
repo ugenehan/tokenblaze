@@ -27,3 +27,7 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+.workbuddy
+/design
+/docs

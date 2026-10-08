@@ -385,6 +385,19 @@ impl FireStateMachine {
         self.custom_preview = None;
     }
 
+    /// Remove usage-derived state after the local usage store is cleared.
+    pub fn clear_usage(&mut self) {
+        self.live = FireSnapshot::EXTINGUISHED;
+        self.recent_inflows.clear();
+        self.recent_live_rate_inflows.clear();
+        self.burn_intensity = 0.0;
+        self.smoothed_weights = [0.0; 7];
+        self.displayed_tokens_per_second = 0.0;
+        self.today_by_source = [0; 7];
+        self.displayed_color_mix = FlameColorMix::CLASSIC;
+        self.return_to_live();
+    }
+
     /// Update today's totals (called by the data layer).
     pub fn update_today_tokens(&mut self, _tokens: i64, by_source: [i64; 7]) {
         self.today_by_source = by_source;
@@ -733,5 +746,16 @@ mod tests {
         assert_eq!(snapshot.phase, FirePhase::Out);
         assert_eq!(snapshot.intensity, 0.0);
         assert_eq!(snapshot.ember_heat, 0.0);
+    }
+
+    #[test]
+    fn clearing_usage_extinguishes_fire_and_preserves_motion_setting() {
+        let mut fire = FireStateMachine::new();
+        fire.reduce_motion = true;
+        fire.ingest(2_500.0, Some(UsageSource::Codex), Instant::now(), true);
+        fire.clear_usage();
+        assert_eq!(fire.snapshot(), FireSnapshot::EXTINGUISHED);
+        assert_eq!(fire.tokens_per_second(), 0.0);
+        assert!(fire.reduce_motion);
     }
 }

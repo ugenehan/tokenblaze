@@ -16,6 +16,15 @@ pub enum AppTheme {
     Light,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CostRates {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -27,6 +36,13 @@ pub struct AppConfig {
     pub reduce_motion: bool,
     pub show_live_rate: bool,
     pub token_poll_interval_seconds: u64,
+    pub retention_days: u32,
+    #[serde(default = "existing_install_onboarding_complete")]
+    pub onboarding_complete: bool,
+    pub cost_enabled: bool,
+    pub cost_rates: [CostRates; 7],
+    pub daily_budget_usd: Option<f64>,
+    pub weekly_budget_usd: Option<f64>,
     pub panel_visible: bool,
     pub window_position: Option<(f64, f64)>,
     #[serde(
@@ -40,6 +56,10 @@ pub struct AppConfig {
 
 fn default_source_colors() -> [[u8; 3]; 7] {
     SourceFlameColors::BUILT_IN
+}
+
+fn existing_install_onboarding_complete() -> bool {
+    true
 }
 
 fn deserialize_source_colors<'de, D>(deserializer: D) -> Result<[[u8; 3]; 7], D::Error>
@@ -65,6 +85,12 @@ impl Default for AppConfig {
             reduce_motion: false,
             show_live_rate: true,
             token_poll_interval_seconds: 2,
+            retention_days: 0,
+            onboarding_complete: false,
+            cost_enabled: false,
+            cost_rates: [CostRates::default(); 7],
+            daily_budget_usd: None,
+            weekly_budget_usd: None,
             panel_visible: true,
             window_position: None,
             source_colors: SourceFlameColors::BUILT_IN,
@@ -198,6 +224,8 @@ mod tests {
         );
         assert_eq!(config.window_position, defaults.window_position);
         assert_eq!(config.source_colors, defaults.source_colors);
+        assert!(config.onboarding_complete);
+        assert!(!defaults.onboarding_complete);
     }
 
     #[test]

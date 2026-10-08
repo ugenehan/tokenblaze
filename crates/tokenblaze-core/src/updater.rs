@@ -24,7 +24,7 @@ use reqwest::Url;
 pub const APPCAST_URL: &str =
     "https://raw.githubusercontent.com/ugenehan/tokenblaze/main/appcast.xml";
 const RELEASES_URL: &str = "https://github.com/ugenehan/tokenblaze/releases";
-const ED25519_PUBLIC_KEY: &str = "3jvJJLbB67g3lB8SU2fZxB7rQpA3Qc4nm7neAexBhpw=";
+pub const ED25519_PUBLIC_KEY: &str = "3jvJJLbB67g3lB8SU2fZxB7rQpA3Qc4nm7neAexBhpw=";
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const USER_AGENT: &str = concat!("TokenBlaze/", env!("CARGO_PKG_VERSION"));
 
@@ -390,7 +390,7 @@ fn download_package(package: &UpdatePackage, sender: &Sender<WorkerMessage>) -> 
     Ok(staged)
 }
 
-fn verify_signature(payload: &[u8], signature: &str, public_key: &str) -> Result<()> {
+pub fn verify_signature(payload: &[u8], signature: &str, public_key: &str) -> Result<()> {
     let public_key: [u8; 32] = STANDARD
         .decode(public_key)
         .context("invalid updater public key")?

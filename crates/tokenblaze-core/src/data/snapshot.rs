@@ -1,6 +1,6 @@
 //! Shared, local dashboard snapshot exchanged by the native host and Tauri UI.
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, CostRates};
 use crate::data::{HourlyUsage, SourceConnectionState, UsageBreakdown, UsageMonitor, UsageSource};
 use crate::fire::{FirePhase, FireStateMachine, FireTier, SourceFlameColors};
 use chrono::{DateTime, Local};
@@ -22,6 +22,8 @@ pub struct DashboardSnapshot {
     pub breakdown: UsageBreakdown,
     pub fire: FireView,
     pub sources: Vec<SourceView>,
+    #[serde(default)]
+    pub recent_events: Vec<RecentEventView>,
     #[serde(default)]
     pub is_rescanning: bool,
     pub config: ConfigView,
@@ -90,6 +92,17 @@ pub struct SourceView {
     pub last_read_at: Option<DateTime<Local>>,
     #[serde(default)]
     pub estimated_tokens: i64,
+    #[serde(default)]
+    pub needs_connection_help: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentEventView {
+    pub source: String,
+    pub source_index: usize,
+    pub timestamp: DateTime<Local>,
+    pub tokens: i64,
+    pub is_estimated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +121,18 @@ pub struct ConfigView {
     pub flame_size: String,
     #[serde(default = "default_token_poll_interval_seconds")]
     pub token_poll_interval_seconds: u64,
+    #[serde(default)]
+    pub retention_days: u32,
+    #[serde(default)]
+    pub onboarding_complete: bool,
+    #[serde(default)]
+    pub cost_enabled: bool,
+    #[serde(default)]
+    pub cost_rates: [CostRates; 7],
+    #[serde(default)]
+    pub daily_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub weekly_budget_usd: Option<f64>,
     #[serde(default = "default_source_colors")]
     pub source_colors: [[u8; 3]; 7],
     #[serde(default)]
@@ -203,7 +228,19 @@ pub fn from_runtime(
                     detail: status.map(|item| item.detail.clone()).unwrap_or_default(),
                     last_read_at: status.and_then(|item| item.last_read_at),
                     estimated_tokens: status.map(|item| item.estimated_tokens).unwrap_or(0),
+                    needs_connection_help: monitor.needs_connection_help(*source),
                 }
+            })
+            .collect(),
+        recent_events: monitor
+            .recent_events()
+            .iter()
+            .map(|event| RecentEventView {
+                source: event.source.display_name().to_string(),
+                source_index: event.source.index(),
+                timestamp: event.timestamp,
+                tokens: event.tokens,
+                is_estimated: event.is_estimated,
             })
             .collect(),
         is_rescanning: monitor.is_rescanning(),
@@ -228,6 +265,12 @@ pub fn config_view(config: &AppConfig) -> ConfigView {
         .to_string(),
         flame_size: flame_size_label(config.flame_size).to_string(),
         token_poll_interval_seconds: config.token_poll_interval_seconds,
+        retention_days: config.retention_days,
+        onboarding_complete: config.onboarding_complete,
+        cost_enabled: config.cost_enabled,
+        cost_rates: config.cost_rates,
+        daily_budget_usd: config.daily_budget_usd,
+        weekly_budget_usd: config.weekly_budget_usd,
         source_colors: config.source_colors,
         source_paths: config.source_paths.clone(),
     }
